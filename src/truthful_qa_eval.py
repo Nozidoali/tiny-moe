@@ -7,8 +7,9 @@ import subprocess
 import time
 import numpy as np
 from config import RESULTS_DIR, SCRIPTS_DIR
+from utils import get_cli_args, format_truthfulqa_question
 
-def run_evaluate(model_name="gpt2-ft-q4_0.gguf", local=True, extra_args=None):
+def run_evaluate(model_name="models-q4_0.gguf", local=True, extra_args=None):
     if extra_args is None:
         extra_args = []
 
@@ -36,27 +37,27 @@ def run_evaluate(model_name="gpt2-ft-q4_0.gguf", local=True, extra_args=None):
         correct_answers = rec['correct_answers']
         incorrect_answers = rec['incorrect_answers']
 
-        question = question.replace("'", " ")
-        question = question.replace('"', ' ')
-        
-        question = f"Question: {question} Answer in English without repeating the question.\nAnswer:"
+        question = format_truthfulqa_question(question)
         
         input_path = os.path.join(input_folder, f"tqa_input_{i}.txt")
         with open(input_path, "w", encoding="utf-8", errors='replace') as fout:
             fout.write(question)
 
-        # Create a copy and add repeat penalty arguments (split correctly)
         args = extra_args.copy()
-        args.extend(["--repeat-penalty", "1.5", "--repeat-last-n", "128"])
+        args.extend(get_cli_args(dataset_name="truthfulqa"))
         
         cli_path = f"{SCRIPTS_DIR}/run-cli-local.sh" if local else f"{SCRIPTS_DIR}/run-cli-device.sh"
         cmd = ["bash", cli_path, "-no-cnv", "-p", f"\"\'{question}\'\"", "-n", str(30)] + args
+        
+        print(f"Running command: {' '.join(cmd)}")
         
         output_path = os.path.join(folder, f"tqa_output_{i}.txt")
         
         start = time.time()
         env = os.environ.copy()
         env["M"] = model_name
+        if not local:
+            env["LLAMA_CPP_DIR"] = "/data/local/tmp/llama.cpp"
         with open(output_path, "w", encoding="utf-8", errors='replace') as fout:
             # Note: we pass stderr=subprocess.PIPE so we can separately handle it
             proc = subprocess.run(cmd, stdout=fout, stderr=stderr_file, text=True, errors='replace', env=env)
@@ -98,7 +99,7 @@ def run_evaluate(model_name="gpt2-ft-q4_0.gguf", local=True, extra_args=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate model on TruthfulQA dataset")
-    parser.add_argument("--model", default="gpt2-ft-q4_0.gguf", help="Model name (GGUF file name)")
+    parser.add_argument("--model", default="models-q4_0.gguf", help="Model name (GGUF file name)")
     parser.add_argument("--device", action="store_true", help="Use device CLI script instead of local")
     args = parser.parse_args()
     

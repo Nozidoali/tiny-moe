@@ -13,7 +13,7 @@ branch=.
 adbserial=
 [ "$S" != "" ] && adbserial="-s $S"
 
-model="gpt2-ft-q4_0.gguf"
+model="models-q4_0.gguf"
 [ "$M" != "" ] && model="$M"
 
 verbose=
@@ -45,5 +45,6 @@ cd $basedir; ulimit -c unlimited;        \
   $verbose $experimental $sched $opmask $profile $nhvx $ndev           \
     ./$branch/build/bin/llama-cli -m $gguf_dir/$model       \
         -t 16 --mlock --ctx-size 1024 --batch-size 1 --temp 0.5 --top_p 0.7 --seed 42 --no-display-prompt -fa off \
+        --ignore-eos \
         -ngl 99 $cli_opts "$@" \
 

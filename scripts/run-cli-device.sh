@@ -12,7 +12,7 @@ branch=.
 adbserial=
 [ "$S" != "" ] && adbserial="-s $S"
 
-model="gpt2-ft-q4_0.gguf"
+model="models-q4_0.gguf"
 [ "$M" != "" ] && model="$M"
 
 device="none"
@@ -50,5 +50,6 @@ adb $adbserial shell " \
       ./$branch/bin/llama-cli -m $basedir/../gguf/$model       \
         -t 1 --mlock --ctx-size 1024 --batch-size 1 --temp 0.5 --top_p 0.5 --seed 42 --no-display-prompt -fa off \
         --device $device \
+        --ignore-eos \
         -ngl 0 $cli_opts "$@" \
 "

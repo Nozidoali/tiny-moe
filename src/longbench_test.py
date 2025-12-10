@@ -2,26 +2,26 @@
 import os
 import time
 import subprocess
+import argparse
 from pathlib import Path
-from config import PROMPT_FILES_DIR, RESULTS_DIR, SCRIPTS_DIR
+from config import PROMPT_FILES_DIR, PROMPT_FILES_TRUNCATED_DIR, RESULTS_DIR, SCRIPTS_DIR, GGUF_DIR
+from utils import get_cli_args
 
 def ensure_dir(p):
     os.makedirs(p, exist_ok=True)
 
-def run_one(cli_path: str, prompt_device_path: str, output_path: str, extra_args=None, stderr_file=None):
-    """
-    Run CLI with -f prompt_device_path, capture stdout → file, but stderr → terminal.
-    Returns the latency (in seconds).
-    """
+def run_one(cli_path: str, prompt_device_path: str, output_path: str, extra_args=None, stderr_file=None, model=None):
     if extra_args is None:
         extra_args = []
     
-    # Create a new list to avoid mutating the original extra_args
     args = extra_args.copy()
-    # Split arguments correctly: each flag and value must be separate list items
-    args.extend(["-n", "128", "--repeat-penalty", "1.5", "--repeat-last-n", "128"])
+    args.extend(get_cli_args(dataset_name="qmsum"))
     cmd = [cli_path, "-no-cnv", "-f", prompt_device_path] + args
-    # If cli_path is a shell script, wrap with bash
+    
+    env = os.environ.copy()
+    if model:
+        env["M"] = model
+    
     if cli_path.endswith(".sh"):
         cmd = ["bash"] + cmd
         
@@ -29,8 +29,7 @@ def run_one(cli_path: str, prompt_device_path: str, output_path: str, extra_args
 
     start = time.time()
     with open(output_path, "w", encoding="utf-8") as fout:
-        # Note: we pass stderr=subprocess.PIPE so we can separately handle it
-        proc = subprocess.run(cmd, stdout=fout, stderr=stderr_file, text=True)
+        proc = subprocess.run(cmd, stdout=fout, stderr=stderr_file, text=True, env=env)
     end = time.time()
 
     latency = end - start
@@ -41,7 +40,7 @@ def run_one(cli_path: str, prompt_device_path: str, output_path: str, extra_args
     return latency
 
 def run_all(local_prompt_dir: str, device_prompt_prefix: str, output_dir: str,
-            cli_path: str, extra_args=None):
+            cli_path: str, extra_args=None, model=None):
     ensure_dir(output_dir)
     local = Path(local_prompt_dir)
     prompt_files = sorted(local.glob("*.prompt.txt"))
@@ -50,9 +49,8 @@ def run_all(local_prompt_dir: str, device_prompt_prefix: str, output_dir: str,
     stderr_file = open('debug.log', 'w', encoding='utf-8')
     t0 = time.time()
     for pf in prompt_files:
-        fname = pf.name  # e.g. "qmsum_test_0.prompt.txt"
+        fname = pf.name
         prompt_dev_path = os.path.join(device_prompt_prefix, fname)
-        # derive output filename, strip ".prompt.txt"
         base = fname
         if base.endswith(".prompt.txt"):
             base = base[:-len(".prompt.txt")]
@@ -60,7 +58,7 @@ def run_all(local_prompt_dir: str, device_prompt_prefix: str, output_dir: str,
         out_path = os.path.join(output_dir, out_fname)
 
         print(f"Running prompt {fname} → output {out_fname}")
-        latency = run_one(cli_path, prompt_dev_path, out_path, extra_args, stderr_file)
+        latency = run_one(cli_path, prompt_dev_path, out_path, extra_args, stderr_file, model)
         print(f"  latency: {latency:.3f} s")
         latencies.append((fname, latency))
 
@@ -69,14 +67,22 @@ def run_all(local_prompt_dir: str, device_prompt_prefix: str, output_dir: str,
     return latencies, total
 
 def main():
-    local_prompt_dir = PROMPT_FILES_DIR
-    device_prompt_prefix = PROMPT_FILES_DIR
-    output_dir = f"{RESULTS_DIR}/qmsum_outputs"
-    cli_path = f"{SCRIPTS_DIR}/run-cli-local.sh"
-    extra_args = []  # e.g. model settings, etc.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", "-m", type=str, default="models-q4_0.gguf", help="Model filename in GGUF directory (e.g., models-q4_0.gguf)")
+    parser.add_argument("--cli", type=str, help="Override CLI script path")
+    parser.add_argument("--prompt-dir", type=str, default=PROMPT_FILES_TRUNCATED_DIR, help="Prompt files directory")
+    parser.add_argument("--output-dir", type=str, default=f"{RESULTS_DIR}/qmsum_outputs", help="Output directory")
+    args = parser.parse_args()
+    
+    local_prompt_dir = args.prompt_dir
+    device_prompt_prefix = args.prompt_dir
+    output_dir = args.output_dir
+    cli_path = args.cli if args.cli else f"{SCRIPTS_DIR}/run-cli-local.sh"
+    extra_args = []
+    model = args.model
 
     latencies, total_time = run_all(
-        local_prompt_dir, device_prompt_prefix, output_dir, cli_path, extra_args
+        local_prompt_dir, device_prompt_prefix, output_dir, cli_path, extra_args, model
     )
 
     print("\n=== Benchmark Summary ===")

@@ -4,11 +4,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 import argparse
 import subprocess
+import json
+import random
+from datetime import datetime
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
-from config import GGUF_DIR, MODELS_DIR, SCRIPTS_DIR
+import evaluate
+import numpy as np
+from config import GGUF_DIR, MODELS_DIR, SCRIPTS_DIR, RESULTS_DIR, PROMPT_FILES_TRUNCATED_DIR
+from utils import generate_text, format_truthfulqa_training, format_truthfulqa_question, format_qmsum_prompt, extract_answer_from_text
 
 def freeze_mlp_only(model):
     for param in model.parameters():
@@ -33,30 +39,150 @@ def freeze_mlp_only(model):
                 for param in layer.mlp.parameters():
                     param.requires_grad = True
 
-def load_and_prepare_dataset(dataset_name, tokenizer, max_length=512):
+class CustomTrainer(Trainer):
+    def __init__(self, *args, dataset_name=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dataset_name = dataset_name
+        if dataset_name == "truthfulqa":
+            self.metric = evaluate.load('bleurt', 'bleurt-large-128')
+        elif dataset_name == "qmsum":
+            self.metric = evaluate.load("rouge")
+    
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if self.dataset_name == "truthfulqa" and "correct_answers" in inputs:
+            inputs.pop("correct_answers", None)
+            inputs.pop("incorrect_answers", None)
+        
+        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch=num_items_in_batch)
+    
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        if self.dataset_name is None:
+            return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        
+        self.model.eval()
+        predictions_text = []
+        
+        eval_ds = eval_dataset or self.eval_dataset
+        eval_dataloader = self.get_eval_dataloader(eval_ds)
+        
+        for step, inputs in enumerate(eval_dataloader):
+            with torch.no_grad():
+                input_ids = inputs["input_ids"].to(self.model.device)
+                generated = generate_text(self.model, self.tokenizer, input_ids, dataset_name=self.dataset_name)
+                pred_text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
+                predictions_text.extend(pred_text)
+        
+        metrics = {}
+        if self.dataset_name == "truthfulqa":
+            max_scores = []
+            acc_scores = []
+            for i, pred in enumerate(predictions_text):
+                if i < len(eval_ds):
+                    ex = eval_ds[i]
+                    pred_answer = extract_answer_from_text(pred, "truthfulqa")
+                    correct_answers = ex.get('correct_answers', [])
+                    incorrect_answers = ex.get('incorrect_answers', [])
+                    if correct_answers and incorrect_answers:
+                        scores_true = self.metric.compute(predictions=[pred_answer]*len(correct_answers), references=correct_answers)['scores']
+                        scores_false = self.metric.compute(predictions=[pred_answer]*len(incorrect_answers), references=incorrect_answers)['scores']
+                        max_scores.append(max(scores_true))
+                        acc_scores.append(1 if max(scores_true) > max(scores_false) else 0)
+            if max_scores:
+                metrics = {
+                    f"{metric_key_prefix}_bleurt_max_score": np.mean(max_scores),
+                    f"{metric_key_prefix}_bleurt_accuracy": np.mean(acc_scores)
+                }
+        
+        elif self.dataset_name == "qmsum":
+            references = []
+            predictions_clean = []
+            for i, pred in enumerate(predictions_text):
+                if i < len(eval_ds):
+                    ex = eval_ds[i]
+                    pred_summary = extract_answer_from_text(pred, "qmsum")
+                    answers = ex.get("answers", [])
+                    ref = answers[0] if isinstance(answers, list) and answers else ""
+                    predictions_clean.append(pred_summary)
+                    references.append(ref)
+            
+            if predictions_clean and references and len(predictions_clean) == len(references):
+                result = self.metric.compute(predictions=predictions_clean, references=references, use_stemmer=True)
+                metrics[f"{metric_key_prefix}_rougeL"] = result["rougeL"]
+        
+        base_metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        if isinstance(base_metrics, dict):
+            metrics.update(base_metrics)
+        
+        if self.dataset_name == "qmsum" and f"{metric_key_prefix}_rougeL" not in metrics:
+            metrics[f"{metric_key_prefix}_rougeL"] = 0.0
+        elif self.dataset_name == "truthfulqa" and f"{metric_key_prefix}_bleurt_accuracy" not in metrics:
+            metrics[f"{metric_key_prefix}_bleurt_accuracy"] = 0.0
+        
+        self.log(metrics)
+        return metrics
+
+def load_original_dataset(dataset_name):
     if dataset_name == "truthfulqa":
-        ds = load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
-        def format_fn(ex):
-            text = f"Question: {ex['question']}\nAnswer: {ex['best_answer']}"
-            tokenized = tokenizer(text, truncation=True, max_length=max_length)
-            tokenized["labels"] = tokenized["input_ids"].copy()
-            return tokenized
+        return load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
     elif dataset_name == "qmsum":
         ds = load_dataset("zai-org/LongBench", "qmsum", split="test", trust_remote_code=True)
-        ds = ds.select(range(min(50, len(ds))))
-        def format_fn(ex):
-            context = ex.get("context", "")
-            input_text = ex.get("input", "")
-            answers = ex.get("answers", [])
-            answer = answers[0] if isinstance(answers, list) and answers else ""
-            prompt = f"{context}\n\n{input_text}" if context and input_text else (input_text or context)
-            text = f"{prompt}\n\nSummary: {answer}"
-            tokenized = tokenizer(text, truncation=True, max_length=max_length)
-            tokenized["labels"] = tokenized["input_ids"].copy()
-            return tokenized
+        return ds.select(range(min(50, len(ds))))
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
-    return ds.map(format_fn, batched=False, remove_columns=ds.column_names)
+
+def load_and_prepare_dataset(dataset_name, tokenizer, max_length=512):
+    original_ds = load_original_dataset(dataset_name)
+    
+    if dataset_name == "truthfulqa":
+        expanded_examples = []
+        
+        for idx, ex in enumerate(original_ds):
+            question = ex['question']
+            correct_answers = ex['correct_answers'] if ex['correct_answers'] else [ex['best_answer']]
+            
+            for answer in correct_answers:
+                full_text = format_truthfulqa_training(question, answer)
+                tokenized = tokenizer(full_text, truncation=True, max_length=max_length)
+                
+                question_only = format_truthfulqa_question(question)
+                question_tokenized = tokenizer(question_only, truncation=True, max_length=max_length, add_special_tokens=False)
+                question_length = len(question_tokenized["input_ids"])
+                
+                labels = tokenized["input_ids"].copy()
+                labels[:question_length] = [-100] * question_length
+                
+                expanded_examples.append({
+                    "input_ids": tokenized["input_ids"],
+                    "attention_mask": tokenized["attention_mask"],
+                    "labels": labels,
+                    "correct_answers": ex['correct_answers'],
+                    "incorrect_answers": ex['incorrect_answers']
+                })
+        
+        from datasets import Dataset
+        expanded_dataset = Dataset.from_list(expanded_examples)
+        print(f"Expanded TruthfulQA: {len(original_ds)} questions → {len(expanded_dataset)} training examples")
+        return expanded_dataset
+    elif dataset_name == "qmsum":
+        prompts_dir = Path(PROMPT_FILES_TRUNCATED_DIR)
+        def format_fn(ex, idx):
+            prompt_file = prompts_dir / f"qmsum_test_{idx}.prompt.txt"
+            assert prompt_file.exists(), f"Prompt file not found: {prompt_file}"
+            with open(prompt_file, "r", encoding="utf-8", errors="replace") as f:
+                prompt = f.read().strip()
+            answers = ex.get("answers", [])
+            answer = answers[0] if isinstance(answers, list) and answers else ""
+            text = format_qmsum_prompt(prompt, answer)
+            tokenized = tokenizer(text, truncation=True, max_length=max_length)
+            tokenized["labels"] = tokenized["input_ids"].copy()
+            tokenized["answers"] = answers
+            return tokenized
+        def format_with_idx(ex, idx):
+            return format_fn(ex, idx)
+        cols_to_remove = [c for c in original_ds.column_names if c not in ['answers']]
+        return original_ds.map(format_with_idx, with_indices=True, batched=False, remove_columns=cols_to_remove)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
 
 def main():
     parser = argparse.ArgumentParser(description="Finetune model experts (MLP layers)")
@@ -67,11 +193,14 @@ def main():
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
     parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device")
     parser.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
-    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument("--eval_split", type=float, default=0.2, help="Eval split ratio")
+    parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay for regularization")
+    parser.add_argument("--eval_split", type=float, default=0.1, help="Eval split ratio")
+    parser.add_argument("--no_split", action="store_true", help="Use entire dataset for both training and evaluation (no split)")
+    parser.add_argument("--eval_every_n_epochs", type=float, default=100, help="Evaluate every N epochs (can be fractional, e.g., 0.5 for twice per epoch)")
     args = parser.parse_args()
     
     output_dir = Path(args.output_dir)
@@ -108,60 +237,115 @@ def main():
     
     print(f"Loading dataset: {args.dataset}")
     dataset = load_and_prepare_dataset(args.dataset, tokenizer, args.max_length)
-    dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
+    
+    if args.no_split:
+        dataset = {"train": dataset, "test": dataset}
+    else:
+        dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
+    
+    debug_dir = Path(RESULTS_DIR) / "dataset" / args.dataset
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving processed dataset to: {debug_dir}")
+    for split_name in ["train", "test"]:
+        split_file = debug_dir / f"{split_name}.json"
+        examples = []
+        for i, ex in enumerate(dataset[split_name]):
+            decoded_input = tokenizer.decode(ex["input_ids"], skip_special_tokens=False)
+            
+            labels_without_mask = [label if label != -100 else tokenizer.pad_token_id for label in ex["labels"]]
+            decoded_labels = tokenizer.decode(labels_without_mask, skip_special_tokens=False)
+            
+            num_masked = sum(1 for label in ex["labels"] if label == -100)
+            
+            example_dict = {
+                "index": i,
+                "input_ids_length": len(ex["input_ids"]),
+                "labels_masked_tokens": num_masked,
+                "decoded_input": decoded_input,
+                "decoded_labels": decoded_labels,
+            }
+            if args.dataset == "truthfulqa":
+                example_dict["correct_answers"] = ex.get("correct_answers", [])
+                example_dict["incorrect_answers"] = ex.get("incorrect_answers", [])
+            elif args.dataset == "qmsum":
+                example_dict["answers"] = ex.get("answers", [])
+            examples.append(example_dict)
+        
+        with open(split_file, "w", encoding="utf-8") as f:
+            json.dump(examples, f, indent=2, ensure_ascii=False)
+        print(f"  Saved {len(examples)} examples to {split_file}")
+    
+    
+    timestamp = datetime.now().strftime("%H%M")
+    model_subdir = output_dir / f"{args.dataset}_{timestamp}"
+    model_subdir.mkdir(parents=True, exist_ok=True)
+    
+    eval_steps = None
+    metric_for_best_model = None
+    greater_is_better = True
+    if args.eval_every_n_epochs > 0:
+        steps_per_epoch = len(dataset["train"]) // (args.batch_size * args.grad_accum)
+        eval_steps = int(steps_per_epoch * args.eval_every_n_epochs)
+        if args.dataset == "truthfulqa":
+            metric_for_best_model = "eval_bleurt_accuracy"
+        elif args.dataset == "qmsum":
+            metric_for_best_model = "eval_rougeL"
     
     training_args = TrainingArguments(
-        output_dir=str(output_dir),
+        output_dir=str(model_subdir),
         overwrite_output_dir=True,
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
-        weight_decay=0.01,
+        weight_decay=args.weight_decay,
         logging_steps=args.grad_accum,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=True,
+        eval_strategy="steps" if eval_steps else "no",
+        eval_steps=eval_steps,
+        save_strategy="steps" if eval_steps else "no",
+        save_steps=eval_steps,
+        load_best_model_at_end=True if metric_for_best_model else False,
+        metric_for_best_model=metric_for_best_model,
+        greater_is_better=greater_is_better,
+        save_total_limit=3,
         fp16=torch.cuda.is_available(),
         report_to=[],
         seed=42,
+        prediction_loss_only=False,
     )
     
     from transformers import default_data_collator
     
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
         data_collator=default_data_collator,
         tokenizer=tokenizer,
+        dataset_name=args.dataset,
     )
     
     print("Starting training...")
     trainer.train()
     
-    print(f"Saving model to: {output_dir}")
+    print(f"Saving model to: {model_subdir}")
     if args.use_lora:
-        model.save_pretrained(str(output_dir))
+        model.save_pretrained(str(model_subdir))
         merged_model = model.merge_and_unload()
-        merged_dir = output_dir / "merged"
-        merged_dir.mkdir(exist_ok=True)
-        merged_model.save_pretrained(str(merged_dir))
-        tokenizer.save_pretrained(str(merged_dir))
-        print(f"LoRA adapter saved to: {output_dir}")
-        print(f"Merged model saved to: {merged_dir}")
-        checkpoint_path = str(merged_dir)
+        merged_model.save_pretrained(str(model_subdir))
+        tokenizer.save_pretrained(str(model_subdir))
+        print(f"Merged model saved to: {model_subdir}")
+        checkpoint_path = str(model_subdir)
     else:
         trainer.save_model()
-        tokenizer.save_pretrained(str(output_dir))
-        checkpoint_path = str(output_dir)
+        tokenizer.save_pretrained(str(model_subdir))
+        checkpoint_path = str(model_subdir)
     
     print("Converting to GGUF format...")
     convert_script = Path(SCRIPTS_DIR) / "convert.sh"
-    model_name = output_dir.name
+    model_name = model_subdir.name
     
     subprocess.run([
         "bash", str(convert_script),
