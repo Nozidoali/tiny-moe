@@ -12,6 +12,6 @@ GGUF_DIR = f"{TINYMOE_DIR}/gguf"
 MODELS_DIR = f"{TINYMOE_DIR}/models"
 SCRIPTS_DIR = f"{TINYMOE_DIR}/scripts"
 RESULTS_DIR = f"{TINYMOE_DIR}/results"
-PROMPT_FILES_DIR = f"{RESULTS_DIR}/prompt_files_truncated"
+PROMPT_FILES_DIR = f"{TINYMOE_DIR}/data/prompt_files"
 PROMPT_FILES_TRUNCATED_DIR = f"{RESULTS_DIR}/prompt_files_truncated"
 
