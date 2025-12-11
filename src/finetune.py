@@ -44,10 +44,14 @@ class CustomTrainer(Trainer):
         self.dataset_name = dataset_name
         self.original_model = original_model
         self.l2_weight = l2_weight
-        if dataset_name == "truthfulqa":
+        self.rouge_metric = None
+        if dataset_name in ["truthfulqa", "mixed"]:
             self.metric = evaluate.load('bleurt', 'bleurt-large-128')
-        elif dataset_name == "qmsum":
-            self.metric = evaluate.load("rouge")
+        if dataset_name in ["qmsum", "mixed"]:
+            if dataset_name == "mixed":
+                self.rouge_metric = evaluate.load("rouge")
+            elif dataset_name == "qmsum":
+                self.metric = evaluate.load("rouge")
     
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if self.dataset_name == "truthfulqa" and "correct_answers" in inputs:
@@ -83,12 +87,13 @@ class CustomTrainer(Trainer):
         for step, inputs in enumerate(eval_dataloader):
             with torch.no_grad():
                 input_ids = inputs["input_ids"].to(self.model.device)
-                generated = generate_text(self.model, self.tokenizer, input_ids, dataset_name=self.dataset_name)
+                dataset_for_gen = "truthfulqa" if self.dataset_name == "mixed" else self.dataset_name
+                generated = generate_text(self.model, self.tokenizer, input_ids, dataset_name=dataset_for_gen)
                 pred_text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)
                 predictions_text.extend(pred_text)
         
         metrics = {}
-        if self.dataset_name == "truthfulqa":
+        if self.dataset_name == "truthfulqa" or self.dataset_name == "mixed":
             max_scores = []
             acc_scores = []
             for i, pred in enumerate(predictions_text):
@@ -108,30 +113,35 @@ class CustomTrainer(Trainer):
                     f"{metric_key_prefix}_bleurt_accuracy": np.mean(acc_scores)
                 }
         
-        elif self.dataset_name == "qmsum":
+        if self.dataset_name == "qmsum" or self.dataset_name == "mixed":
             references = []
             predictions_clean = []
             for i, pred in enumerate(predictions_text):
                 if i < len(eval_ds):
                     ex = eval_ds[i]
-                    pred_summary = extract_answer_from_text(pred, "qmsum")
-                    answers = ex.get("answers", [])
-                    ref = answers[0] if isinstance(answers, list) and answers else ""
-                    predictions_clean.append(pred_summary)
-                    references.append(ref)
+                    if 'answers' in ex:
+                        pred_summary = extract_answer_from_text(pred, "qmsum")
+                        answers = ex.get("answers", [])
+                        ref = answers[0] if isinstance(answers, list) and answers else ""
+                        predictions_clean.append(pred_summary)
+                        references.append(ref)
             
             if predictions_clean and references and len(predictions_clean) == len(references):
-                result = self.metric.compute(predictions=predictions_clean, references=references, use_stemmer=True)
-                metrics[f"{metric_key_prefix}_rougeL"] = result["rougeL"]
+                rouge_eval = self.rouge_metric if self.dataset_name == "mixed" else self.metric
+                result = rouge_eval.compute(predictions=predictions_clean, references=references, use_stemmer=True)
+                if self.dataset_name == "qmsum":
+                    metrics[f"{metric_key_prefix}_rougeL"] = result["rougeL"]
+                else:
+                    metrics[f"{metric_key_prefix}_rougeL"] = result["rougeL"] if references else 0.0
         
         base_metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
         if isinstance(base_metrics, dict):
             metrics.update(base_metrics)
         
-        if self.dataset_name == "qmsum" and f"{metric_key_prefix}_rougeL" not in metrics:
+        if f"{metric_key_prefix}_rougeL" not in metrics:
             metrics[f"{metric_key_prefix}_rougeL"] = 0.0
-        elif self.dataset_name == "truthfulqa" and f"{metric_key_prefix}_bleurt_accuracy" not in metrics:
-            metrics[f"{metric_key_prefix}_bleurt_accuracy"] = 0.0
+        if f"{metric_key_prefix}_bleurt_max_score" not in metrics:
+            metrics[f"{metric_key_prefix}_bleurt_max_score"] = 0.0
         
         self.log(metrics)
         return metrics
@@ -216,7 +226,7 @@ def main():
     parser = argparse.ArgumentParser(description="Finetune model experts (MLP layers)")
     parser.add_argument("--input_model", default="gpt2", help="Input HuggingFace model path")
     parser.add_argument("--output_dir", default=MODELS_DIR, help="Output directory for finetuned model")
-    parser.add_argument("--dataset", default="truthfulqa", choices=["truthfulqa", "qmsum"], help="Dataset name")
+    parser.add_argument("--dataset", default="truthfulqa", choices=["truthfulqa", "qmsum", "mixed"], help="Dataset name")
     parser.add_argument("--unfreeze_all", action="store_true", help="Unfreeze all layers for full model finetuning (default: only MLP layers)")
     parser.add_argument("--max_length", type=int, default=2028, help="Max sequence length")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
@@ -268,12 +278,34 @@ def main():
         freeze_mlp_only(model)
     
     print(f"Loading dataset: {args.dataset}")
-    dataset = load_and_prepare_dataset(args.dataset, tokenizer, args.max_length)
     
-    if args.no_split:
-        dataset = {"train": dataset, "test": dataset}
+    if args.dataset == "mixed":
+        print("Loading mixed dataset (TruthfulQA + QMSum)...")
+        from datasets import concatenate_datasets
+        
+        dataset_tqa_full = load_and_prepare_dataset("truthfulqa", tokenizer, args.max_length)
+        dataset_qms_full = load_and_prepare_dataset("qmsum", tokenizer, args.max_length)
+        
+        if args.no_split:
+            combined = concatenate_datasets([dataset_tqa_full, dataset_qms_full])
+            dataset = {"train": combined, "test": combined}
+        else:
+            dataset_tqa = dataset_tqa_full.train_test_split(test_size=args.eval_split, seed=42)
+            dataset_qms = dataset_qms_full.train_test_split(test_size=args.eval_split, seed=42)
+            
+            train_combined = concatenate_datasets([dataset_tqa["train"], dataset_qms["train"]])
+            test_combined = concatenate_datasets([dataset_tqa["test"], dataset_qms["test"]])
+            dataset = {"train": train_combined, "test": test_combined}
+        
+        print(f"  Combined training samples: {len(dataset['train'])}")
+        print(f"  Combined eval samples: {len(dataset['test'])}")
     else:
-        dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
+        dataset = load_and_prepare_dataset(args.dataset, tokenizer, args.max_length)
+        
+        if args.no_split:
+            dataset = {"train": dataset, "test": dataset}
+        else:
+            dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
     
     debug_dir = Path(RESULTS_DIR) / "dataset" / args.dataset
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +359,8 @@ def main():
         if args.dataset == "truthfulqa":
             metric_for_best_model = "eval_bleurt_max_score"
         elif args.dataset == "qmsum":
+            metric_for_best_model = "eval_rougeL"
+        elif args.dataset == "mixed":
             metric_for_best_model = "eval_rougeL"
     
     tensorboard_log_dir = model_subdir / "logs"

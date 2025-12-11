@@ -40,18 +40,19 @@ def run_evaluate(model_name="models-q4_0.gguf", local=True, extra_args=None, dev
     n = len(ds)
     print(f"Loaded {n} test samples for Truthful QA")
 
-    # initiate BLEURT evaluator model
-    bleurt = evaluate.load('bleurt', 'bleurt-large-128') # load large model for accuracy
+    bleurt = evaluate.load('bleurt', 'bleurt-large-128')
 
-    #debug log
     stderr_file = open('debug.log', 'w', encoding='utf-8')
     max_score_arr = []
     acc_score_arr = []
     
-    folder = f"{RESULTS_DIR}/outputs" if local else f"{RESULTS_DIR}/outputs_device"
-    input_folder = f"{RESULTS_DIR}/inputs" if local else f"{RESULTS_DIR}/inputs_device"
+    timestamp = time.strftime("%H%M")
+    folder = f"{RESULTS_DIR}/outputs_{timestamp}" if local else f"{RESULTS_DIR}/outputs_device_{timestamp}"
+    input_folder = f"{RESULTS_DIR}/inputs_{timestamp}" if local else f"{RESULTS_DIR}/inputs_device_{timestamp}"
     os.makedirs(folder, exist_ok=True)
     os.makedirs(input_folder, exist_ok=True)
+    
+    print(f"Saving outputs to: {folder}")
 
     for i, rec in enumerate(ds):
         print(f"-------- sample {i} --------")

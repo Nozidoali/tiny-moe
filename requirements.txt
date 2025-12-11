@@ -36,3 +36,4 @@ tf-keras
 # BLEURT (installed from git)
 git+https://github.com/google-research/bleurt.git
 
+tiktoken
