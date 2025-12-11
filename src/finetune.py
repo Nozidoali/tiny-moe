@@ -238,6 +238,7 @@ def main():
     parser.add_argument("--no_split", action="store_true", help="Use entire dataset for both training and evaluation (no split)")
     parser.add_argument("--eval_every_n_epochs", type=float, default=100, help="Evaluate every N epochs (can be fractional, e.g., 0.5 for twice per epoch)")
     parser.add_argument("--l2_weight", type=float, default=0.01, help="L2 regularization weight to keep model close to original (prevents catastrophic forgetting)")
+    parser.add_argument("--balance_datasets", action="store_true", help="Balance datasets when using mixed mode (downsample larger to match smaller)")
     args = parser.parse_args()
     
     output_dir = Path(args.output_dir)
@@ -285,6 +286,15 @@ def main():
         
         dataset_tqa_full = load_and_prepare_dataset("truthfulqa", tokenizer, args.max_length)
         dataset_qms_full = load_and_prepare_dataset("qmsum", tokenizer, args.max_length)
+        
+        print(f"  TruthfulQA samples: {len(dataset_tqa_full)}")
+        print(f"  QMSum samples: {len(dataset_qms_full)}")
+        
+        if args.balance_datasets:
+            min_samples = min(len(dataset_tqa_full), len(dataset_qms_full))
+            print(f"  Balancing datasets to {min_samples} samples each...")
+            dataset_tqa_full = dataset_tqa_full.shuffle(seed=42).select(range(min_samples))
+            dataset_qms_full = dataset_qms_full.shuffle(seed=42).select(range(min_samples))
         
         if args.no_split:
             combined = concatenate_datasets([dataset_tqa_full, dataset_qms_full])
