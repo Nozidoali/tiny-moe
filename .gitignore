@@ -5,3 +5,5 @@ gguf/
 *.log
 
 .DS_Store
+
+tinymoe.llama.cpp/
