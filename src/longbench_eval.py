@@ -2,6 +2,7 @@
 
 import os
 import re
+import argparse
 from datasets import load_dataset
 import evaluate
 from config import RESULTS_DIR
@@ -70,12 +71,21 @@ def evaluate_folder_outputs(output_dir: str, ref_map: dict):
     return results, result
 
 def main():
-    output_dir = f"{RESULTS_DIR}/qmsum_outputs"
-    print("Loading references …")
+    parser = argparse.ArgumentParser(description="Evaluate QMSum model outputs")
+    parser.add_argument("--device", action="store_true", help="Evaluate device outputs instead of local")
+    parser.add_argument("--output-dir", type=str, help="Custom output directory to evaluate")
+    args = parser.parse_args()
+    
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = f"{RESULTS_DIR}/qmsum_outputs_device" if args.device else f"{RESULTS_DIR}/qmsum_outputs"
+    
+    print("Loading references...")
     ref_map = load_references()
     print(f"Loaded {len(ref_map)} references.")
 
-    print("Evaluating predictions in", output_dir)
+    print(f"Evaluating predictions in {output_dir}")
     per_sample_scores, aggregated = evaluate_folder_outputs(output_dir, ref_map)
 
     print("\n=== ROUGE-L per sample ===")
@@ -83,7 +93,6 @@ def main():
         print(f"Sample {idx}: ROUGE-L = {rl:.4f}")
 
     print("\n=== Aggregated ROUGE ===")
-    # Print only rougeL, or print all metrics
     print(f"ROUGE-L (F1): {aggregated['rougeL']:.4f}")
     print(f"ROUGE-1: {aggregated['rouge1']:.4f}, ROUGE-2: {aggregated['rouge2']:.4f}, ROUGE-Lsum: {aggregated['rougeLsum']:.4f}")
 

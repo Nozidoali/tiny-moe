@@ -325,7 +325,7 @@ def main():
         
         eval_steps = int(steps_per_epoch * args.eval_every_n_epochs)
         if args.dataset == "truthfulqa":
-            metric_for_best_model = "eval_bleurt_accuracy"
+            metric_for_best_model = "eval_bleurt_max_score"
         elif args.dataset == "qmsum":
             metric_for_best_model = "eval_rougeL"
     

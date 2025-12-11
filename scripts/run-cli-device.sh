@@ -48,7 +48,7 @@ adb $adbserial shell " \
     ADSP_LIBRARY_PATH=$basedir/$branch/lib \
     $verbose $experimental $sched $opmask $profile $nhvx $ndev           \
       ./$branch/bin/llama-cli -m $basedir/../gguf/$model       \
-        -t 1 --mlock --ctx-size 1024 --batch-size 1 --temp 0.5 --top_p 0.5 --seed 42 --no-display-prompt -fa off \
+        -t 4 --mlock --ctx-size 1024 --batch-size 128 --temp 0.5 --top_p 0.5 --seed 42 --no-display-prompt -fa off \
         --device $device \
         --ignore-eos \
         -ngl 0 $cli_opts "$@" \

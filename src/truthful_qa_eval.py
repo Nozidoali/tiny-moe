@@ -1,15 +1,38 @@
 #!/usr/bin/env python3
 import os
 import argparse
+from pathlib import Path
 from datasets import load_dataset
 import evaluate
 import subprocess
 import time
 import numpy as np
-from config import RESULTS_DIR, SCRIPTS_DIR
+from config import RESULTS_DIR, SCRIPTS_DIR, DEVICE_LLAMA_CPP_DIR, GGUF_DIR
 from utils import get_cli_args, format_truthfulqa_question
 
-def run_evaluate(model_name="models-q4_0.gguf", local=True, extra_args=None):
+def push_model_to_device(model_path, device_serial=None):
+    model_file = Path(model_path)
+    if not model_file.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    
+    model_name = model_file.name
+    device_path = f"/data/local/tmp/gguf/{model_name}"
+    
+    adb_cmd = ["adb"]
+    if device_serial:
+        adb_cmd.extend(["-s", device_serial])
+    adb_cmd.extend(["push", str(model_file), device_path])
+    
+    print(f"Pushing model {model_name} to device...")
+    start = time.time()
+    result = subprocess.run(adb_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Model push failed: {result.stderr}")
+    print(f"✓ Model pushed in {time.time() - start:.2f}s\n")
+    
+    return model_name
+
+def run_evaluate(model_name="models-q4_0.gguf", local=True, extra_args=None, device_serial=None):
     if extra_args is None:
         extra_args = []
 
@@ -57,7 +80,7 @@ def run_evaluate(model_name="models-q4_0.gguf", local=True, extra_args=None):
         env = os.environ.copy()
         env["M"] = model_name
         if not local:
-            env["LLAMA_CPP_DIR"] = "/data/local/tmp/llama.cpp"
+            env["LLAMA_CPP_DIR"] = DEVICE_LLAMA_CPP_DIR
         with open(output_path, "w", encoding="utf-8", errors='replace') as fout:
             # Note: we pass stderr=subprocess.PIPE so we can separately handle it
             proc = subprocess.run(cmd, stdout=fout, stderr=stderr_file, text=True, errors='replace', env=env)
@@ -101,9 +124,23 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate model on TruthfulQA dataset")
     parser.add_argument("--model", default="models-q4_0.gguf", help="Model name (GGUF file name)")
     parser.add_argument("--device", action="store_true", help="Use device CLI script instead of local")
+    parser.add_argument("--no-push", action="store_true", help="Skip pushing model (assume already on device)")
+    parser.add_argument("--serial", type=str, help="Device serial number (for multiple devices)")
     args = parser.parse_args()
     
-    run_evaluate(model_name=args.model, local=not args.device)
+    local = not args.device
+    
+    if local:
+        model_name = args.model
+    else:
+        if not args.no_push:
+            model_path = f"{GGUF_DIR}/{args.model}" if not os.path.isabs(args.model) else args.model
+            model_name = push_model_to_device(model_path, args.serial)
+        else:
+            model_name = args.model
+            print(f"Skipping push, using model: {model_name}")
+    
+    run_evaluate(model_name=model_name, local=local, device_serial=args.serial)
 
 if __name__ == "__main__":
     main()
