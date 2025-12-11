@@ -231,10 +231,10 @@ def main():
     parser.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay for regularization")
-    parser.add_argument("--eval_split", type=float, default=0.1, help="Eval split ratio")
+    parser.add_argument("--eval_split", type=float, default=0.25, help="Eval split ratio")
     parser.add_argument("--no_split", action="store_true", help="Use entire dataset for both training and evaluation (no split)")
     parser.add_argument("--eval_every_n_epochs", type=float, default=100, help="Evaluate every N epochs (can be fractional, e.g., 0.5 for twice per epoch)")
-    parser.add_argument("--l2_weight", type=float, default=0.01, help="L2 regularization weight to keep model close to original (prevents catastrophic forgetting)")
+    parser.add_argument("--l2_weight", type=float, default=0.05, help="L2 regularization weight to keep model close to original (prevents catastrophic forgetting)")
     parser.add_argument("--balance_datasets", action="store_true", help="Balance datasets when using mixed mode (downsample larger to match smaller)")
     args = parser.parse_args()
     
@@ -296,7 +296,7 @@ def main():
         if args.balance_datasets:
             min_samples = min(len(dataset_tqa_full), len(dataset_qms_full))
             print(f"  Balancing datasets to {min_samples} samples each...")
-            dataset_tqa_full = dataset_tqa_full.shuffle(seed=42).select(range(min_samples))
+            dataset_tqa_full = dataset_tqa_full.shuffle(seed=42).select(range(min_samples * 4))
             dataset_qms_full = dataset_qms_full.shuffle(seed=42).select(range(min_samples))
         
         if args.no_split:

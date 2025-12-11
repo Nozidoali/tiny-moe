@@ -16,5 +16,5 @@ RESULTS_DIR = f"{TINYMOE_DIR}/results"
 PROMPT_FILES_DIR = f"{TINYMOE_DIR}/data/prompt_files"
 PROMPT_FILES_TRUNCATED_DIR = f"{RESULTS_DIR}/prompt_files_truncated"
 
-DEVICE_LLAMA_CPP_DIR = "/data/local/tmp/llama.cpp"
+DEVICE_LLAMA_CPP_DIR = "/data/local/tmp/tinymoe.llama.cpp"
 
