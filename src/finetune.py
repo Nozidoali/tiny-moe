@@ -53,6 +53,9 @@ class CustomTrainer(Trainer):
             inputs.pop("correct_answers", None)
             inputs.pop("incorrect_answers", None)
         
+        if self.dataset_name == "qmsum" and "answers" in inputs:
+            inputs.pop("answers", None)
+        
         return super().compute_loss(model, inputs, return_outputs, num_items_in_batch=num_items_in_batch)
     
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
@@ -172,9 +175,22 @@ def load_and_prepare_dataset(dataset_name, tokenizer, max_length=512):
                 prompt = f.read().strip()
             answers = ex.get("answers", [])
             answer = answers[0] if isinstance(answers, list) and answers else ""
-            text = format_qmsum_prompt(prompt, answer)
-            tokenized = tokenizer(text, truncation=True, max_length=max_length)
-            tokenized["labels"] = tokenized["input_ids"].copy()
+            
+            full_text = format_qmsum_prompt(prompt, answer)
+            tokenized = tokenizer(full_text, truncation=True, max_length=max_length)
+            
+            prompt_only = format_qmsum_prompt(prompt)
+            prompt_tokenized = tokenizer(prompt_only, truncation=True, max_length=max_length)
+            prompt_length = len(prompt_tokenized["input_ids"])
+            
+            labels = tokenized["input_ids"].copy()
+            if prompt_length >= len(labels):
+                print(f"Warning: Prompt length ({prompt_length}) >= total length ({len(labels)}). Summary was truncated!")
+                prompt_length = max(0, len(labels) - 10)
+            
+            labels[:prompt_length] = [-100] * prompt_length
+            
+            tokenized["labels"] = labels
             tokenized["answers"] = answers
             return tokenized
         def format_with_idx(ex, idx):
@@ -190,9 +206,10 @@ def main():
     parser.add_argument("--output_dir", default=MODELS_DIR, help="Output directory for finetuned model")
     parser.add_argument("--dataset", default="truthfulqa", choices=["truthfulqa", "qmsum"], help="Dataset name")
     parser.add_argument("--use_lora", action="store_true", help="Use LoRA instead of full MLP finetuning")
+    parser.add_argument("--unfreeze_all", action="store_true", help="Unfreeze all layers for full model finetuning (default: only MLP layers)")
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
     parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
-    parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
+    parser.add_argument("--max_length", type=int, default=2028, help="Max sequence length")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device")
     parser.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
@@ -231,6 +248,12 @@ def main():
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
+    elif args.unfreeze_all:
+        print("Unfreezing all layers for full model finetuning...")
+        for param in model.parameters():
+            param.requires_grad = True
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,}")
     else:
         print("Freezing all except MLP layers...")
         freeze_mlp_only(model)
@@ -285,11 +308,19 @@ def main():
     greater_is_better = True
     if args.eval_every_n_epochs > 0:
         steps_per_epoch = len(dataset["train"]) // (args.batch_size * args.grad_accum)
+        
+        if args.eval_every_n_epochs >= args.num_epochs:
+            print(f"Warning: eval_every_n_epochs ({args.eval_every_n_epochs}) >= num_epochs ({args.num_epochs})")
+            print(f"Setting eval_every_n_epochs to {args.num_epochs / 2} for at least 2 evaluations")
+            args.eval_every_n_epochs = max(1.0, args.num_epochs / 2)
+        
         eval_steps = int(steps_per_epoch * args.eval_every_n_epochs)
         if args.dataset == "truthfulqa":
             metric_for_best_model = "eval_bleurt_accuracy"
         elif args.dataset == "qmsum":
             metric_for_best_model = "eval_rougeL"
+    
+    tensorboard_log_dir = model_subdir / "logs"
     
     training_args = TrainingArguments(
         output_dir=str(model_subdir),
@@ -300,6 +331,7 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
+        logging_dir=str(tensorboard_log_dir),
         logging_steps=args.grad_accum,
         eval_strategy="steps" if eval_steps else "no",
         eval_steps=eval_steps,
@@ -310,7 +342,7 @@ def main():
         greater_is_better=greater_is_better,
         save_total_limit=3,
         fp16=torch.cuda.is_available(),
-        report_to=[],
+        report_to=["tensorboard"],
         seed=42,
         prediction_loss_only=False,
     )
@@ -328,6 +360,8 @@ def main():
     )
     
     print("Starting training...")
+    print(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
+    print(f"To view logs, run: tensorboard --logdir {tensorboard_log_dir}")
     trainer.train()
     
     print(f"Saving model to: {model_subdir}")
