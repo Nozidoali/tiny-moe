@@ -250,7 +250,7 @@ def main():
         print(f"Loading original model for L2 regularization (weight={args.l2_weight})...")
         original_model = AutoModelForCausalLM.from_pretrained(
             args.input_model,
-            torch_dtype=torch.float32 if not torch.cuda.is_available() else torch.float16
+            torch_dtype=torch.float32
         )
         original_model = original_model.to(device)
         for param in original_model.parameters():
