@@ -43,6 +43,8 @@ def get_cli_args(dataset_name=None, **kwargs):
         params["max_new_tokens"] = 30
     elif dataset_name == "qmsum":
         params["max_new_tokens"] = 128
+    elif dataset_name == "mmlu":
+        params["max_new_tokens"] = 5
     params.update(kwargs)
     
     return [
@@ -66,9 +68,16 @@ def format_qmsum_prompt(prompt: str, summary: str = None) -> str:
         return f"{prompt}\n\nSummary: {summary}"
     return prompt.strip()
 
+def format_mmlu_question(question: str, choices: list) -> str:
+    question = question.replace("'", " ").replace('"', ' ')
+    choices_text = "\n".join([f"{chr(65+i)}. {choice}" for i, choice in enumerate(choices)])
+    return f"Question: {question}\n{choices_text}\nAnswer:"
+
 def extract_answer_from_text(text: str, dataset_name: str) -> str:
     if dataset_name == "truthfulqa":
         return text.split("Answer:")[-1].strip() if "Answer:" in text else text.strip()
     elif dataset_name == "qmsum":
         return text.split("Summary:")[-1].strip() if "Summary:" in text else text.strip()
+    elif dataset_name == "mmlu":
+        return text.split("Answer:")[-1].strip() if "Answer:" in text else text.strip()
     return text.strip()

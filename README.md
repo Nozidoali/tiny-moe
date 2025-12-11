@@ -10,7 +10,7 @@ export LLAMA_CPP_DIR="/path/to/llama.cpp"
 ## Workflow
 
 First finetune the QMSum model.
-```
+```bash
 python src/finetune.py --dataset qmsum --input_model BEE-spoke-data/smol_llama-81M-tied \
   --num_epochs 200 \
   --eval_every_n_epochs 10
