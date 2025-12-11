@@ -7,10 +7,11 @@ import torch.nn.functional as F
 import argparse
 import json
 import copy
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from utils import load_model_and_tokenizer
-from config import MODELS_DIR
+from config import MODELS_DIR, SCRIPTS_DIR, GGUF_DIR
 
 
 class MoELayer(nn.Module):
@@ -163,6 +164,19 @@ def main():
         print(f"  {name}")
     print(f"  ...")
     print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    print("\nConverting to GGUF format...")
+    convert_script = Path(SCRIPTS_DIR) / "convert.sh"
+    model_name = Path(args.output_dir).name
+    
+    subprocess.run([
+        "bash", str(convert_script),
+        "--checkpoint", str(args.output_dir),
+        "--name", model_name,
+        "--output-dir", GGUF_DIR
+    ], check=True)
+    
+    print("Done!")
 
 
 if __name__ == "__main__":

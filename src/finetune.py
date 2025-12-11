@@ -248,10 +248,25 @@ def main():
     original_model = None
     if args.l2_weight > 0.0:
         print(f"Loading original model for L2 regularization (weight={args.l2_weight})...")
-        original_model = AutoModelForCausalLM.from_pretrained(
-            args.input_model,
-            torch_dtype=torch.float32
-        )
+        # Check if model is TinyMoE
+        config_path = Path(args.input_model) / "config.json"
+        is_tinymoe = False
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                is_tinymoe = (config.get('model_type') == 'TinyMoE')
+        
+        if is_tinymoe:
+            from tinymoe import AutoModelForTinyMoE
+            original_model = AutoModelForTinyMoE.from_pretrained(
+                args.input_model,
+                torch_dtype=torch.float32
+            )
+        else:
+            original_model = AutoModelForCausalLM.from_pretrained(
+                args.input_model,
+                torch_dtype=torch.float32
+            )
         original_model = original_model.to(device)
         for param in original_model.parameters():
             param.requires_grad = False
