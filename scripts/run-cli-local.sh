@@ -1,9 +1,10 @@
 #!/bin/sh
 #
 
-# Basedir on device
-basedir="${LLAMA_CPP_DIR:-/Users/hanyu/Documents/cs259/external/llama.cpp}"
-gguf_dir="${TINYMOE_DIR:-/Users/hanyu/Documents/tinymoe}/gguf"
+# Use relative path from TINYMOE_DIR
+TINYMOE_DIR="${TINYMOE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+basedir="${LLAMA_CPP_DIR:-$TINYMOE_DIR/external/llama.cpp}"
+gguf_dir="$TINYMOE_DIR/gguf"
 
 cli_opts=
 

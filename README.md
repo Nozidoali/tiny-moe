@@ -1,10 +1,35 @@
 # TinyMoE
 
-## Environment Variables Setup
+## Setup
+
+### 1. Clone the repository and initialize submodules
+
+```bash
+git clone <repository-url>
+cd tinymoe
+git submodule update --init --recursive
+```
+
+### 2. Build llama.cpp
+
+The llama.cpp submodule is located in `external/llama.cpp` and is checked out to the `hexagon` branch. To build it:
+
+```bash
+cd external/llama.cpp
+mkdir -p build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j
+```
+
+The build will create binaries in `external/llama.cpp/build/bin/` including:
+- `llama-cli` - Command-line interface
+- `llama-quantize` - Model quantization tool
+
+### 3. Environment Variables Setup
 
 ```bash
 export TINYMOE_DIR="/path/to/tinymoe"
-export LLAMA_CPP_DIR="/path/to/llama.cpp"
 ```
 
 ## Convert Model to MoE

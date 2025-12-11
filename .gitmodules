@@ -1,0 +1,3 @@
+[submodule "external/llama.cpp"]
+	path = external/llama.cpp
+	url = git@github.com:Nozidoali/llama.cpp.git

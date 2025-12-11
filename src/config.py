@@ -6,7 +6,8 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
 TINYMOE_DIR = os.getenv("TINYMOE_DIR", "/Users/hanyu/Documents/tinymoe")
-LLAMA_CPP_DIR = os.getenv("LLAMA_CPP_DIR", "/Users/hanyu/Documents/cs259/external/llama.cpp")
+# Use relative path from TINYMOE_DIR
+LLAMA_CPP_DIR = os.path.join(TINYMOE_DIR, "external", "llama.cpp")
 
 GGUF_DIR = f"{TINYMOE_DIR}/gguf"
 MODELS_DIR = f"{TINYMOE_DIR}/models"

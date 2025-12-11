@@ -2,7 +2,9 @@
 
 set -e
 
-LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-$HOME/Documents/llama.cpp}"
+# Use relative path from TINYMOE_DIR
+TINYMOE_DIR="${TINYMOE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-$TINYMOE_DIR/external/llama.cpp}"
 CHECKPOINT_PATH=""
 NAME=""
 OUTPUT_DIR=""
@@ -23,6 +25,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --llama-cpp-dir)
             LLAMA_CPP_DIR="$2"
+            shift 2
+            ;;
+        --tinymoe-dir)
+            TINYMOE_DIR="$2"
+            LLAMA_CPP_DIR="$TINYMOE_DIR/external/llama.cpp"
             shift 2
             ;;
         *)

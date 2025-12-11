@@ -79,6 +79,14 @@ class AutoModelForTinyMoE:
                 if state_dict['lm_head.weight'].data_ptr() == state_dict['model.embed_tokens.weight'].data_ptr():
                     state_dict['lm_head.weight'] = state_dict['model.embed_tokens.weight'].clone()
         
+        # Fix gate weights to ensure they're contiguous and properly formatted for GGUF conversion
+        # This prevents corruption during lazy tensor handling in convert_hf_to_gguf.py
+        for key in list(state_dict.keys()):
+            if key.endswith('.mlp.gate.weight'):
+                # Ensure gate weights are contiguous in memory
+                state_dict[key] = state_dict[key].contiguous().clone()
+                print(f"Fixed gate weight: {key}, shape={state_dict[key].shape}")
+        
         save_file(state_dict, output_dir / "model.safetensors")
         
         if hasattr(model, '_tinymoe_config'):
