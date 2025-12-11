@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model, TaskType
 import evaluate
 import numpy as np
 from config import GGUF_DIR, MODELS_DIR, SCRIPTS_DIR, RESULTS_DIR, PROMPT_FILES_TRUNCATED_DIR
@@ -40,9 +39,11 @@ def freeze_mlp_only(model):
                     param.requires_grad = True
 
 class CustomTrainer(Trainer):
-    def __init__(self, *args, dataset_name=None, **kwargs):
+    def __init__(self, *args, dataset_name=None, original_model=None, l2_weight=0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.dataset_name = dataset_name
+        self.original_model = original_model
+        self.l2_weight = l2_weight
         if dataset_name == "truthfulqa":
             self.metric = evaluate.load('bleurt', 'bleurt-large-128')
         elif dataset_name == "qmsum":
@@ -56,7 +57,18 @@ class CustomTrainer(Trainer):
         if self.dataset_name == "qmsum" and "answers" in inputs:
             inputs.pop("answers", None)
         
-        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch=num_items_in_batch)
+        outputs = model(**inputs)
+        loss = outputs.loss if isinstance(outputs, dict) else outputs[0]
+        
+        if self.l2_weight > 0.0 and self.original_model is not None:
+            l2_reg = 0.0
+            for (name, param), (_, orig_param) in zip(model.named_parameters(), self.original_model.named_parameters()):
+                if param.requires_grad:
+                    l2_reg += torch.sum((param - orig_param) ** 2)
+            
+            loss = loss + self.l2_weight * l2_reg
+        
+        return (loss, outputs) if return_outputs else loss
     
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         if self.dataset_name is None:
@@ -205,10 +217,7 @@ def main():
     parser.add_argument("--input_model", default="gpt2", help="Input HuggingFace model path")
     parser.add_argument("--output_dir", default=MODELS_DIR, help="Output directory for finetuned model")
     parser.add_argument("--dataset", default="truthfulqa", choices=["truthfulqa", "qmsum"], help="Dataset name")
-    parser.add_argument("--use_lora", action="store_true", help="Use LoRA instead of full MLP finetuning")
     parser.add_argument("--unfreeze_all", action="store_true", help="Unfreeze all layers for full model finetuning (default: only MLP layers)")
-    parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
-    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
     parser.add_argument("--max_length", type=int, default=2028, help="Max sequence length")
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device")
@@ -218,6 +227,7 @@ def main():
     parser.add_argument("--eval_split", type=float, default=0.1, help="Eval split ratio")
     parser.add_argument("--no_split", action="store_true", help="Use entire dataset for both training and evaluation (no split)")
     parser.add_argument("--eval_every_n_epochs", type=float, default=100, help="Evaluate every N epochs (can be fractional, e.g., 0.5 for twice per epoch)")
+    parser.add_argument("--l2_weight", type=float, default=0.01, help="L2 regularization weight to keep model close to original (prevents catastrophic forgetting)")
     args = parser.parse_args()
     
     output_dir = Path(args.output_dir)
@@ -236,19 +246,18 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     model = model.to(device)
     
-    if args.use_lora:
-        print("Applying LoRA...")
-        lora_config = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM,
+    original_model = None
+    if args.l2_weight > 0.0:
+        print(f"Loading original model for L2 regularization (weight={args.l2_weight})...")
+        original_model = AutoModelForCausalLM.from_pretrained(
+            args.input_model,
+            torch_dtype=torch.float32 if not torch.cuda.is_available() else torch.float16
         )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-    elif args.unfreeze_all:
+        original_model = original_model.to(device)
+        for param in original_model.parameters():
+            param.requires_grad = False
+    
+    if args.unfreeze_all:
         print("Unfreezing all layers for full model finetuning...")
         for param in model.parameters():
             param.requires_grad = True
@@ -357,6 +366,8 @@ def main():
         data_collator=default_data_collator,
         tokenizer=tokenizer,
         dataset_name=args.dataset,
+        original_model=original_model,
+        l2_weight=args.l2_weight,
     )
     
     print("Starting training...")
@@ -365,17 +376,9 @@ def main():
     trainer.train()
     
     print(f"Saving model to: {model_subdir}")
-    if args.use_lora:
-        model.save_pretrained(str(model_subdir))
-        merged_model = model.merge_and_unload()
-        merged_model.save_pretrained(str(model_subdir))
-        tokenizer.save_pretrained(str(model_subdir))
-        print(f"Merged model saved to: {model_subdir}")
-        checkpoint_path = str(model_subdir)
-    else:
-        trainer.save_model()
-        tokenizer.save_pretrained(str(model_subdir))
-        checkpoint_path = str(model_subdir)
+    trainer.save_model()
+    tokenizer.save_pretrained(str(model_subdir))
+    checkpoint_path = str(model_subdir)
     
     print("Converting to GGUF format...")
     convert_script = Path(SCRIPTS_DIR) / "convert.sh"
