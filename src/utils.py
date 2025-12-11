@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import torch
+import json
+from pathlib import Path
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
 
 DEFAULT_GEN_PARAMS = {
     "max_new_tokens": 128,
@@ -10,6 +14,32 @@ DEFAULT_GEN_PARAMS = {
     "do_sample": False,
     "seed": 42,
 }
+
+def load_model_and_tokenizer(model_path, torch_dtype=None):
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    if torch_dtype is None:
+        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    
+    config_path = Path(model_path) / "config.json"
+    is_tinymoe = False
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            is_tinymoe = (config.get('model_type') == 'TinyMoE')
+    
+    if is_tinymoe:
+        from tinymoe import AutoModelForTinyMoE
+        model = AutoModelForTinyMoE.from_pretrained(model_path, torch_dtype=torch_dtype)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch_dtype)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    model = model.to(device)
+    
+    return model, tokenizer, device
 
 def generate_text(model, tokenizer, input_ids, dataset_name=None, **kwargs):
     params = DEFAULT_GEN_PARAMS.copy()
@@ -72,3 +102,11 @@ def extract_answer_from_text(text: str, dataset_name: str) -> str:
     elif dataset_name == "qmsum":
         return text.split("Summary:")[-1].strip() if "Summary:" in text else text.strip()
     return text.strip()
+
+def load_eval_dataset(dataset_name):
+    if dataset_name == "truthfulqa":
+        return load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
+    elif dataset_name in ["qmsum", "longbench"]:
+        ds = load_dataset("zai-org/LongBench", "qmsum", split="test", trust_remote_code=True)
+        return ds.select(range(min(50, len(ds))))
+    return None

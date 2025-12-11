@@ -13,7 +13,7 @@ from datasets import load_dataset
 import evaluate
 import numpy as np
 from config import GGUF_DIR, MODELS_DIR, SCRIPTS_DIR, RESULTS_DIR, PROMPT_FILES_TRUNCATED_DIR
-from utils import generate_text, format_truthfulqa_training, format_truthfulqa_question, format_qmsum_prompt, extract_answer_from_text
+from utils import generate_text, format_truthfulqa_training, format_truthfulqa_question, format_qmsum_prompt, extract_answer_from_text, load_model_and_tokenizer, load_eval_dataset
 
 def freeze_mlp_only(model):
     for param in model.parameters():
@@ -147,13 +147,10 @@ class CustomTrainer(Trainer):
         return metrics
 
 def load_original_dataset(dataset_name):
-    if dataset_name == "truthfulqa":
-        return load_dataset("truthfulqa/truthful_qa", "generation", split="validation")
-    elif dataset_name == "qmsum":
-        ds = load_dataset("zai-org/LongBench", "qmsum", split="test", trust_remote_code=True)
-        return ds.select(range(min(50, len(ds))))
-    else:
+    ds = load_eval_dataset(dataset_name)
+    if ds is None:
         raise ValueError(f"Unknown dataset: {dataset_name}")
+    return ds
 
 def load_and_prepare_dataset(dataset_name, tokenizer, max_length=512):
     original_ds = load_original_dataset(dataset_name)
@@ -244,18 +241,9 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Loading model from: {args.input_model}")
-    tokenizer = AutoTokenizer.from_pretrained(args.input_model)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        args.input_model,
-        torch_dtype=torch.float32 if not torch.cuda.is_available() else torch.float16
-    )
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-    model = model.to(device)
+    # Load model and tokenizer using shared utility function
+    torch_dtype = torch.float32 if not torch.cuda.is_available() else torch.float16
+    model, tokenizer, device = load_model_and_tokenizer(args.input_model, torch_dtype=torch_dtype)
     
     original_model = None
     if args.l2_weight > 0.0:
